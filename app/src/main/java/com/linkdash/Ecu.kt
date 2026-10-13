@@ -64,11 +64,16 @@ class UsbLink(private val ctx: Context) {
         close()
         val p = drv.ports[0]
         p.open(conn)
-        p.setParameters(baud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+        val eff = if (baud > 3_000_000) {
+            p.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            setHighBaud(conn, baud)
+        } else {
+            p.setParameters(baud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE); baud
+        }
         port = p; total = 0; values = null
         out = File(ctx.getExternalFilesDir(null), "capture_${System.currentTimeMillis() / 1000}.txt")
         running = true
-        info = "Connected @ $baud. Log: ${out!!.absolutePath}"
+        info = "Connected @ $eff. Log: ${out!!.absolutePath}"
         Thread {
             val buf = ByteArray(4096); var lastReq = 0L
             try {
@@ -78,7 +83,7 @@ class UsbLink(private val ctx: Context) {
                         val b = buf.copyOf(n); total += n
                         log("RX", b)
                         LinkProtocol.decode(b)?.let { values = it }
-                        info = "Connected @ $baud - $total bytes received. Log: ${out!!.name}"
+                        info = "Connected @ $eff - $total bytes received. Log: ${out!!.name}"
                     }
                     val now = System.currentTimeMillis()
                     if (now - lastReq > 100) {
@@ -88,6 +93,23 @@ class UsbLink(private val ctx: Context) {
                 }
             } catch (e: Exception) { info = "USB error: ${e.message}"; running = false }
         }.start()
+    }
+
+    /** The library stops at 3.5 Mbaud, so for the FT232H set the faster speed ourselves (120 MHz clock mode). */
+    private fun setHighBaud(conn: UsbDeviceConnection, baud: Int): Int {
+        val base = 120_000_000L * 16 / 10
+        val divisor = base / baud
+        var best = if ((divisor and 1L) == 1L) divisor / 2 + 1 else divisor / 2
+        if (best > 0x1ffffL) best = 0x1ffffL
+        val raw = base / best
+        val actual = if ((raw and 1L) == 1L) raw / 2 + 1 else raw / 2
+        val frac = intArrayOf(0, 3, 2, 4, 1, 5, 6, 7)
+        val enc = (best shr 3) or (frac[(best and 7L).toInt()].toLong() shl 14) or 0x20000L
+        val value = (enc and 0xFFFFL).toInt()
+        val index = ((((enc shr 16) and 0xFFFFL).toInt()) shl 8) or 1
+        val r = conn.controlTransfer(0x40, 3, value, index, null, 0, 1000)
+        if (r < 0) throw java.io.IOException("Setting baud rate failed")
+        return actual.toInt()
     }
 
     fun send(b: ByteArray) { Thread { try { port?.write(b, 500); log("TX", b) } catch (_: Exception) {} }.start() }
