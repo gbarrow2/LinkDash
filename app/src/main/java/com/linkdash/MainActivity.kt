@@ -9,8 +9,8 @@ import android.os.*
 import android.text.InputType
 import android.view.*
 import android.widget.*
-import com.hoho.android.usbserial.driver.UsbSerialProber
 import kotlin.math.*
+import com.hoho.android.usbserial.driver.FtdiSerialDriver
 
 class Ch(val key: String, val name: String, val unit: String, val min: Double, val max: Double,
          var lo: Double, var hi: Double, var on: Boolean) {
@@ -49,11 +49,12 @@ class MainActivity : Activity() {
         Ch("iat", "Intake air", "°C", 0.0, 100.0, Double.NaN, 70.0, true),
         Ch("lambda", "Lambda", "λ", 0.6, 1.4, 0.7, 1.15, true),
         Ch("batt", "Battery", "V", 8.0, 16.0, 11.5, 15.0, true),
-        Ch("tps", "Throttle", "%", 0.0, 100.0, Double.NaN, Double.NaN, false),
+        Ch("tps", "Throttle", "%", 0.0, 100.0, Double.NaN, Double.NaN, true),
         Ch("knock", "Knock", "lvl", 0.0, 100.0, Double.NaN, 30.0, false),
+        Ch("fuelt", "Fuel temp", "°C", 0.0, 100.0, Double.NaN, 80.0, true),
         Ch("fuelp", "Fuel press", "kPa", 0.0, 600.0, 250.0, Double.NaN, false),
         Ch("oilp", "Oil press", "kPa", 0.0, 800.0, 150.0, Double.NaN, false),
-        Ch("egt", "EGT", "°C", 0.0, 1100.0, Double.NaN, 950.0, false)
+        Ch("egt", "EGT", "°C", 0.0, 1100.0, Double.NaN, 950.0, false),
     )
     private val h = Handler(Looper.getMainLooper())
     private lateinit var prefs: SharedPreferences
@@ -155,8 +156,13 @@ class MainActivity : Activity() {
 
     private fun connect() {
         val mgr = getSystemService(USB_SERVICE) as UsbManager
-        val drv = UsbSerialProber.getDefaultProber().findAllDrivers(mgr).firstOrNull()
-        if (drv == null) { Toast.makeText(this, "No USB serial device found. Check the OTG adapter and cable.", Toast.LENGTH_LONG).show(); link.info = "No USB device"; return }
+        val drv = LinkProtocol.prober().findAllDrivers(mgr).firstOrNull()
+            ?: mgr.deviceList.values.firstOrNull { it.vendorId == 0x0403 }?.let { FtdiSerialDriver(it) }
+        if (drv == null) {
+            val seen = mgr.deviceList.values.joinToString { "%04X:%04X".format(it.vendorId, it.productId) }.ifEmpty { "none" }
+            link.info = "No serial device found. USB devices the phone sees: $seen"
+            Toast.makeText(this, link.info, Toast.LENGTH_LONG).show(); return
+        }
         if (!mgr.hasPermission(drv.device)) {
             val act = "com.linkdash.USB_PERM"
             val r = object : BroadcastReceiver() {
@@ -171,11 +177,11 @@ class MainActivity : Activity() {
             mgr.requestPermission(drv.device, PendingIntent.getBroadcast(this, 0, Intent(act).setPackage(packageName), fl))
             return
         }
-        val et = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("baud", 115200).toString()) }
+        val et = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("baud2", 4687500).toString()) }
         AlertDialog.Builder(this).setTitle("Baud rate").setView(et)
             .setPositiveButton("Connect") { _, _ ->
-                val baud = et.text.toString().toIntOrNull() ?: 115200
-                prefs.edit().putInt("baud", baud).apply()
+                val baud = et.text.toString().toIntOrNull() ?: 4687500
+                prefs.edit().putInt("baud2", baud).apply()
                 try { link.open(drv, mgr.openDevice(drv.device), baud) }
                 catch (e: Exception) { link.info = "Open failed: ${e.message}" }
             }.show()
@@ -199,7 +205,7 @@ class MainActivity : Activity() {
             "clt" to 90 + 20 * sin(t * 0.05), // drifts over 105 now and then to test alarm
             "iat" to 40 + 20 * sin(t * 0.1), "lambda" to 0.9 + 0.2 * sin(t * 0.7),
             "batt" to 13.8 + 0.5 * sin(t), "tps" to 50 + 50 * sin(t * 0.5), "knock" to 10 + 15 * sin(t * 0.3) + 15,
-            "fuelp" to 300 + 20 * sin(t), "oilp" to 400 + 100 * sin(t * 0.5), "egt" to 700 + 200 * sin(t * 0.2)
+            "fuelt" to 30 + 10 * sin(t * 0.1), "fuelp" to 300 + 20 * sin(t), "oilp" to 400 + 100 * sin(t * 0.5), "egt" to 700 + 200 * sin(t * 0.2)
         )
     }
 
