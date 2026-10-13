@@ -5,13 +5,50 @@ import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import android.hardware.usb.UsbDeviceConnection
 import java.io.File
+import com.hoho.android.usbserial.driver.FtdiSerialDriver
+import com.hoho.android.usbserial.driver.UsbSerialProber
 
-/** FILL THIS IN once the PCLink capture has been decoded. Keys must match channel keys in MainActivity. */
+/** Link ECU protocol, decoded from a PCLink capture. Request every poll; reply is 5B 5A, cmd, len, then 1668 bytes. */
 object LinkProtocol {
-    /** Bytes to send to the ECU to ask for runtime data (null = just listen). */
-    fun request(): ByteArray? = null
-    /** Turn received bytes into values, e.g. mapOf("rpm" to 3000.0, "clt" to 88.0). Null = nothing decoded. */
-    fun decode(rx: ByteArray): Map<String, Double>? = null
+    private val REQ = byteArrayOf(0x5A, 0x5B, 0x00, 0x09, 0x00, 0x02, 0xB1.toByte(), 0x88.toByte())
+    private var acc = ByteArray(0)
+
+    /** The Link cable is an FTDI chip with a custom product ID, so add it to the known-device list. */
+    fun prober(): UsbSerialProber {
+        val t = UsbSerialProber.getDefaultProbeTable()
+        t.addProduct(0x0403, 0x7069, FtdiSerialDriver::class.java)
+        return UsbSerialProber(t)
+    }
+
+    fun request(): ByteArray = REQ
+
+    fun decode(rx: ByteArray): Map<String, Double>? {
+        acc += rx
+        var result: Map<String, Double>? = null
+        while (true) {
+            var i = 0
+            while (i + 1 < acc.size && !(acc[i] == 0x5B.toByte() && acc[i + 1] == 0x5A.toByte())) i++
+            if (i + 6 > acc.size) { acc = acc.copyOfRange(maxOf(0, minOf(i, acc.size - 1)), acc.size); break }
+            val cmd = ((acc[i + 2].toInt() and 255) shl 8) or (acc[i + 3].toInt() and 255)
+            val len = ((acc[i + 4].toInt() and 255) shl 8) or (acc[i + 5].toInt() and 255)
+            if (len > 8000) { acc = acc.copyOfRange(i + 2, acc.size); continue }
+            if (acc.size < i + 6 + len) { acc = acc.copyOfRange(i, acc.size); break }
+            val p = acc.copyOfRange(i + 6, i + 6 + len)
+            acc = acc.copyOfRange(i + 6 + len, acc.size)
+            if (cmd == 9 && len == 1668) result = parse(p)
+        }
+        return result
+    }
+
+    private fun parse(p: ByteArray): Map<String, Double> {
+        fun w(i: Int) = (((p[2 * i].toInt() and 255) shl 8) or (p[2 * i + 1].toInt() and 255)).toShort().toDouble()
+        fun u(o: Int) = (((p[o].toInt() and 255) shl 8) or (p[o + 1].toInt() and 255)).toDouble()
+        return mapOf(
+            "rpm" to u(809),
+            "clt" to w(0) / 10, "iat" to w(1) / 10, "fuelt" to w(4) / 10,
+            "map" to w(9) / 10, "batt" to w(87) / 1000, "tps" to w(13) / 10
+        ) // lambda, knock etc. still to be located
+    }
 }
 
 class UsbLink(private val ctx: Context) {
